@@ -1,168 +1,240 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import cv2
-from PIL import Image
-from rapidfuzz import process
 import easyocr
-from sentence_transformers import SentenceTransformer, util
+import cv2
+import re
+from PIL import Image
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from ultralytics import YOLO
 
-# ================= LOAD DATA =================
-
-df = pd.read_csv("books.csv")
-
-df["features"] = (
-    df["title"] * 3 + " " +
-    df["author"] + " " +
-    df["genre"] * 2 + " " +
-    df["description"]
-)
-
-# ================= LOAD MODELS =================
-
+# -------------------------------
+# LOAD MODELS
+# -------------------------------
 @st.cache_resource
 def load_models():
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    reader = easyocr.Reader(['en'], gpu=False)
-    return model, reader
+    bert = SentenceTransformer('all-MiniLM-L6-v2')
+    yolo = YOLO("yolov8n.pt")
+    return bert, yolo
 
-model, reader = load_models()
+model, yolo_model = load_models()
 
+# -------------------------------
+# LOAD DATASET
+# -------------------------------
 @st.cache_data
-def compute_embeddings(data):
-    return model.encode(data.tolist(), convert_to_tensor=True)
+def load_data():
+    df = pd.read_csv("books.csv")
+    df['combined'] = df['title'] + " " + df['genre'] + " " + df['description']
+    return df
 
-book_embeddings = compute_embeddings(df["features"])
+df = load_data()
 
-# ================= FUNCTIONS =================
+# -------------------------------
+# CREATE EMBEDDINGS
+# -------------------------------
+@st.cache_data
+def create_embeddings(texts):
+    return model.encode(texts, show_progress_bar=False)
 
-def is_blurry(image):
-    img = np.array(image)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    return cv2.Laplacian(gray, cv2.CV_64F).var() < 100
+embeddings = create_embeddings(df['combined'].tolist())
 
+# -------------------------------
+# OCR SETUP
+# -------------------------------
+reader = easyocr.Reader(['en'], gpu=False)
+
+# -------------------------------
+# TEXT CLEANING
+# -------------------------------
 def clean_text(text):
-    lines = text.split("\n")
-    return [line.strip() for line in lines if len(line.strip()) > 3]
+    text = text.lower()
+    text = re.sub(r'[^a-zA-Z0-9 ]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
-# 🔥 NEW: Clean OCR noise
-def clean_ocr_noise(text):
-    words = text.split()
-    return " ".join([w for w in words if len(w) > 3])
+# -------------------------------
+# YOLO DETECT + CROP
+# -------------------------------
+def detect_and_crop_books(image):
+    img = np.array(image)
+    results = yolo_model(img)
 
-def is_valid_text(t):
-    return len(t) > 3 and any(c.isalpha() for c in t)
+    crops = []
 
-def match_books(extracted, df):
-    matched = []
-    titles = df["title"].str.lower().tolist()
+    for r in results:
+        boxes = r.boxes.xyxy.cpu().numpy()
 
-    for line in extracted:
-        match = process.extractOne(line.lower(), titles, score_cutoff=50)
-        if match:
-            matched.append(df.iloc[match[2]]["title"])
+        for box in boxes:
+            x1, y1, x2, y2 = map(int, box)
 
-    return list(set(matched))
+            crop = img[y1:y2, x1:x2]
 
-# ================= UI =================
+            if crop.shape[0] > 50 and crop.shape[1] > 20:
+                crops.append(crop)
 
-st.set_page_config(page_title="Smart Shelf Finder", layout="centered")
+    return crops
 
-st.title("📚 Smart Shelf Finder (AI Powered)")
-st.info("📸 Upload a bookshelf image")
+# -------------------------------
+# OCR PER BOOK
+# -------------------------------
+def extract_text_from_crops(crops):
+    texts = []
 
-uploaded_file = st.file_uploader("Upload image", type=["jpg", "png", "jpeg"])
+    for crop in crops:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
 
-matched_books = []
+        result = reader.readtext(thresh)
+        text = " ".join([res[1] for res in result])
+        text = clean_text(text)
 
-# ================= IMAGE PROCESSING =================
+        if len(text) > 3:
+            texts.append(text)
+
+    return texts
+
+# -------------------------------
+# MATCH BOOKS USING BERT
+# -------------------------------
+def match_books_from_texts(texts):
+    detected_books = []
+
+    for text in texts:
+        query_embedding = model.encode([text])
+        sims = cosine_similarity(query_embedding, embeddings)[0]
+
+        best_idx = np.argmax(sims)
+        best_score = sims[best_idx]
+
+        title = df.iloc[best_idx]['title']
+        genre = df.iloc[best_idx]['genre']
+        desc = df.iloc[best_idx]['description']
+
+        # Confidence scoring
+        if best_score > 0.60:
+            confidence = "✅ High"
+        elif best_score > 0.45:
+            confidence = "🟡 Medium"
+        else:
+            confidence = "⚠️ Low"
+
+        detected_books.append({
+            "text": text,
+            "title": title,
+            "genre": genre,
+            "score": round(float(best_score), 2),
+            "confidence": confidence,
+            "description": desc
+        })
+
+    return detected_books
+
+# -------------------------------
+# GENRE DETECTION (BERT BASED)
+# -------------------------------
+def detect_genre_bert(text):
+    genres = ["fiction", "history", "finance", "business", "self-help", "productivity"]
+
+    scores = {}
+    for g in genres:
+        score = cosine_similarity(
+            model.encode([text]),
+            model.encode([g])
+        )[0][0]
+        scores[g] = score
+
+    return max(scores, key=scores.get)
+
+# -------------------------------
+# RECOMMENDATION SYSTEM
+# -------------------------------
+def recommend_books(user_input, genre_filter=None, top_n=5):
+    query_embedding = model.encode([user_input])
+    sims = cosine_similarity(query_embedding, embeddings)[0]
+
+    df_copy = df.copy()
+    df_copy['similarity'] = sims
+
+    if genre_filter:
+        df_copy = df_copy[df_copy['genre'].str.lower() == genre_filter.lower()]
+
+    # 🔥 Threshold applied
+    df_copy = df_copy[df_copy['similarity'] > 0.40]
+
+    df_sorted = df_copy.sort_values(by='similarity', ascending=False)
+
+    return df_sorted.head(top_n)
+
+# -------------------------------
+# STREAMLIT UI
+# -------------------------------
+st.title("📚 AI Bookshelf Scanner (Final Year Project)")
+
+uploaded_file = st.file_uploader("📸 Upload Bookshelf Image", type=["jpg","png","jpeg"])
 
 if uploaded_file:
-
     image = Image.open(uploaded_file)
-    st.image(image, caption="Uploaded Image", width="stretch")
+    st.image(image, caption="Uploaded Image")
 
-    if is_blurry(image):
-        st.error("❌ Image too blurry")
-        st.stop()
+    with st.spinner("🔍 Detecting books and extracting text..."):
+        crops = detect_and_crop_books(image)
+        texts = extract_text_from_crops(crops)
+        results = match_books_from_texts(texts)
 
-    with st.spinner("🔍 Processing image..."):
+    st.subheader("📚 Detected Books")
 
-        img_np = np.array(image)
+    if len(results) == 0:
+        st.warning("No books detected properly")
+    else:
+        for book in results:
+            st.markdown(f"📘 **{book['title']}**")
+            st.caption(f"Genre: {book['genre']} | Match: {book['score']} | {book['confidence']}")
+            st.write(book['description'])
+            st.write(f"🧾 OCR: {book['text']}")
+            st.write("---")
 
-        # 🔥 Crop middle
-        h, w, _ = img_np.shape
-        img_np = img_np[int(h*0.2):int(h*0.85), :]
+    # Auto genre from all detected text
+    combined_text = " ".join(texts)
+    detected_genre = detect_genre_bert(combined_text)
 
-        rotations = [
-            img_np,
-            cv2.rotate(img_np, cv2.ROTATE_90_CLOCKWISE),
-            cv2.rotate(img_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        ]
+    st.subheader("🧠 Auto Detected Genre")
+    st.success(detected_genre)
 
-        all_text = []
+# -------------------------------
+# USER INPUT
+# -------------------------------
+user_input = st.text_input("🔍 Enter your interest")
 
-        for img in rotations:
+user_genre = st.selectbox(
+    "🎯 Select Genre",
+    ["", "fiction", "self-help", "finance", "business", "history", "productivity"]
+)
 
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+# -------------------------------
+# RECOMMENDATION BUTTON
+# -------------------------------
+if st.button("🚀 Get Recommendations"):
 
-            adjusted = cv2.convertScaleAbs(gray, alpha=2.0, beta=50)
-            edges = cv2.Canny(adjusted, 50, 150)
+    if not user_input:
+        st.warning("Enter your interest")
+    else:
+        if user_genre:
+            if 'detected_genre' in locals() and detected_genre != user_genre:
+                st.warning(f"⚠️ Mismatch: Image suggests '{detected_genre}' but you selected '{user_genre}'")
 
-            kernel = np.ones((2,2), np.uint8)
-            dilated = cv2.dilate(edges, kernel, iterations=1)
+        final_genre = user_genre if user_genre else (detected_genre if 'detected_genre' in locals() else None)
 
-            results = reader.readtext(dilated)
+        recs = recommend_books(user_input, final_genre)
 
-            for res in results:
-                if res[2] > 0.25 and is_valid_text(res[1]):
-                    all_text.append(res[1])
+        if len(recs) == 0:
+            st.error("No strong matches found")
+        else:
+            st.subheader("🎯 Recommended Books")
 
-        text = "\n".join(all_text)
-
-        # 🔥 CLEAN OCR TEXT
-        text = clean_ocr_noise(text)
-
-    # DEBUG
-    st.write("### 🧾 Extracted Text:")
-    st.write(text)
-
-    if len(text.strip()) < 10:
-        st.warning("⚠️ Not enough readable text. Try better image.")
-        st.stop()
-
-    cleaned = clean_text(text)
-    matched_books = match_books(cleaned, df)
-
-    if matched_books:
-        st.success("✅ Detected Books:")
-        for book in matched_books:
-            st.write(f"📘 {book}")
-
-# ================= RECOMMENDATION =================
-
-st.write("### 🔍 Find Books Based on Your Interest")
-
-user_interest = st.text_input("Enter interest (e.g., fiction, history, finance)")
-
-if st.button("Find Books"):
-
-    if not user_interest.strip():
-        st.warning("⚠️ Enter interest")
-        st.stop()
-
-    user_embedding = model.encode(user_interest, convert_to_tensor=True)
-
-    # 🔥 GLOBAL SEARCH (your requested change)
-    scores = []
-
-    for i, emb in enumerate(book_embeddings):
-        sim = util.cos_sim(user_embedding, emb).item()
-        scores.append((df.iloc[i]["title"], sim))
-
-    scores = sorted(scores, key=lambda x: x[1], reverse=True)
-
-    st.write("### 🎯 Best Matches:")
-
-    for book, score in scores[:5]:
-        st.write(f"📘 {book} (match: {round(score, 2)})")
+            for _, row in recs.iterrows():
+                st.markdown(f"📘 **{row['title']}**")
+                st.caption(f"Genre: {row['genre']} | Match: {round(row['similarity'],2)}")
+                st.write(row['description'])
+                st.write("---")
