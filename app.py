@@ -21,7 +21,7 @@ def load_models():
 model, yolo_model = load_models()
 
 # -------------------------------
-# LOAD DATASET
+# LOAD DATA
 # -------------------------------
 @st.cache_data
 def load_data():
@@ -32,7 +32,7 @@ def load_data():
 df = load_data()
 
 # -------------------------------
-# CREATE EMBEDDINGS
+# EMBEDDINGS
 # -------------------------------
 @st.cache_data
 def create_embeddings(texts):
@@ -41,18 +41,24 @@ def create_embeddings(texts):
 embeddings = create_embeddings(df['combined'].tolist())
 
 # -------------------------------
-# OCR SETUP
+# OCR
 # -------------------------------
 reader = easyocr.Reader(['en'], gpu=False)
 
 # -------------------------------
-# TEXT CLEANING
+# CLEAN TEXT
 # -------------------------------
 def clean_text(text):
     text = text.lower()
     text = re.sub(r'[^a-zA-Z0-9 ]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
+
+# -------------------------------
+# RELAXED VALIDATION
+# -------------------------------
+def is_valid_text(text):
+    return len(text) > 5
 
 # -------------------------------
 # YOLO DETECT + CROP
@@ -62,41 +68,51 @@ def detect_and_crop_books(image):
     results = yolo_model(img)
 
     crops = []
-
     for r in results:
         boxes = r.boxes.xyxy.cpu().numpy()
-
         for box in boxes:
             x1, y1, x2, y2 = map(int, box)
-
             crop = img[y1:y2, x1:x2]
 
-            if crop.shape[0] > 50 and crop.shape[1] > 20:
+            if crop.shape[0] > 40 and crop.shape[1] > 15:
                 crops.append(crop)
 
     return crops
 
 # -------------------------------
-# OCR PER BOOK
+# OCR WITH ROTATION
 # -------------------------------
 def extract_text_from_crops(crops):
     texts = []
 
     for crop in crops:
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
 
-        result = reader.readtext(thresh)
-        text = " ".join([res[1] for res in result])
-        text = clean_text(text)
+        rotations = [
+            gray,
+            cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE),
+            cv2.rotate(gray, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        ]
 
-        if len(text) > 3:
-            texts.append(text)
+        best_text = ""
+
+        for img in rotations:
+            _, thresh = cv2.threshold(img, 150, 255, cv2.THRESH_BINARY)
+            result = reader.readtext(thresh)
+
+            text = " ".join([res[1] for res in result])
+            text = clean_text(text)
+
+            if len(text) > len(best_text):
+                best_text = text
+
+        if is_valid_text(best_text):
+            texts.append(best_text)
 
     return texts
 
 # -------------------------------
-# MATCH BOOKS USING BERT
+# MATCH BOOKS (RELAXED)
 # -------------------------------
 def match_books_from_texts(texts):
     detected_books = []
@@ -108,11 +124,10 @@ def match_books_from_texts(texts):
         best_idx = np.argmax(sims)
         best_score = sims[best_idx]
 
-        title = df.iloc[best_idx]['title']
-        genre = df.iloc[best_idx]['genre']
-        desc = df.iloc[best_idx]['description']
+        if best_score < 0.30:
+            continue
 
-        # Confidence scoring
+        # Confidence levels
         if best_score > 0.60:
             confidence = "✅ High"
         elif best_score > 0.45:
@@ -121,18 +136,30 @@ def match_books_from_texts(texts):
             confidence = "⚠️ Low"
 
         detected_books.append({
-            "text": text,
-            "title": title,
-            "genre": genre,
+            "title": df.iloc[best_idx]['title'],
+            "genre": df.iloc[best_idx]['genre'],
             "score": round(float(best_score), 2),
-            "confidence": confidence,
-            "description": desc
+            "description": df.iloc[best_idx]['description'],
+            "ocr": text,
+            "confidence": confidence
         })
 
     return detected_books
 
 # -------------------------------
-# GENRE DETECTION (BERT BASED)
+# REMOVE DUPLICATES
+# -------------------------------
+def remove_duplicates(books):
+    seen = set()
+    unique = []
+    for book in books:
+        if book['title'] not in seen:
+            seen.add(book['title'])
+            unique.append(book)
+    return unique
+
+# -------------------------------
+# GENRE DETECTION
 # -------------------------------
 def detect_genre_bert(text):
     genres = ["fiction", "history", "finance", "business", "self-help", "productivity"]
@@ -148,9 +175,9 @@ def detect_genre_bert(text):
     return max(scores, key=scores.get)
 
 # -------------------------------
-# RECOMMENDATION SYSTEM
+# RECOMMENDATION
 # -------------------------------
-def recommend_books(user_input, genre_filter=None, top_n=5):
+def recommend_books(user_input, genre_filter=None):
     query_embedding = model.encode([user_input])
     sims = cosine_similarity(query_embedding, embeddings)[0]
 
@@ -160,47 +187,51 @@ def recommend_books(user_input, genre_filter=None, top_n=5):
     if genre_filter:
         df_copy = df_copy[df_copy['genre'].str.lower() == genre_filter.lower()]
 
-    # 🔥 Threshold applied
-    df_copy = df_copy[df_copy['similarity'] > 0.40]
+    df_copy = df_copy[df_copy['similarity'] > 0.35]
 
-    df_sorted = df_copy.sort_values(by='similarity', ascending=False)
-
-    return df_sorted.head(top_n)
+    return df_copy.sort_values(by='similarity', ascending=False).head(5)
 
 # -------------------------------
-# STREAMLIT UI
+# UI
 # -------------------------------
-st.title("📚 AI Bookshelf Scanner (Final Year Project)")
+st.title("📚 AI Bookshelf Scanner (Stable Version)")
 
 uploaded_file = st.file_uploader("📸 Upload Bookshelf Image", type=["jpg","png","jpeg"])
+
+detected_genre = None
 
 if uploaded_file:
     image = Image.open(uploaded_file)
     st.image(image, caption="Uploaded Image")
 
-    with st.spinner("🔍 Detecting books and extracting text..."):
+    with st.spinner("🔍 Processing..."):
         crops = detect_and_crop_books(image)
         texts = extract_text_from_crops(crops)
-        results = match_books_from_texts(texts)
+        books = match_books_from_texts(texts)
+        books = remove_duplicates(books)
+
+    # 🔥 FALLBACK
+    if not books:
+        st.warning("⚠️ Using fallback (full image OCR)...")
+        texts = extract_text_from_crops([np.array(image)])
+        books = match_books_from_texts(texts)
 
     st.subheader("📚 Detected Books")
 
-    if len(results) == 0:
-        st.warning("No books detected properly")
+    if not books:
+        st.error("❌ Still no books detected")
     else:
-        for book in results:
-            st.markdown(f"📘 **{book['title']}**")
-            st.caption(f"Genre: {book['genre']} | Match: {book['score']} | {book['confidence']}")
-            st.write(book['description'])
-            st.write(f"🧾 OCR: {book['text']}")
+        for b in books:
+            st.markdown(f"📘 **{b['title']}**")
+            st.caption(f"Genre: {b['genre']} | Match: {b['score']} | {b['confidence']}")
+            st.write(b['description'])
+            st.write(f"🧾 OCR: {b['ocr']}")
             st.write("---")
 
-    # Auto genre from all detected text
-    combined_text = " ".join(texts)
-    detected_genre = detect_genre_bert(combined_text)
-
-    st.subheader("🧠 Auto Detected Genre")
-    st.success(detected_genre)
+    if texts:
+        detected_genre = detect_genre_bert(" ".join(texts))
+        st.subheader("🧠 Auto Detected Genre")
+        st.success(detected_genre)
 
 # -------------------------------
 # USER INPUT
@@ -213,18 +244,17 @@ user_genre = st.selectbox(
 )
 
 # -------------------------------
-# RECOMMENDATION BUTTON
+# RECOMMEND
 # -------------------------------
 if st.button("🚀 Get Recommendations"):
 
     if not user_input:
         st.warning("Enter your interest")
     else:
-        if user_genre:
-            if 'detected_genre' in locals() and detected_genre != user_genre:
-                st.warning(f"⚠️ Mismatch: Image suggests '{detected_genre}' but you selected '{user_genre}'")
+        if detected_genre and user_genre and detected_genre != user_genre:
+            st.warning(f"⚠️ Mismatch: Image suggests '{detected_genre}' but you selected '{user_genre}'")
 
-        final_genre = user_genre if user_genre else (detected_genre if 'detected_genre' in locals() else None)
+        final_genre = user_genre if user_genre else detected_genre
 
         recs = recommend_books(user_input, final_genre)
 
