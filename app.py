@@ -49,6 +49,9 @@ if uploaded_file:
     # 🔍 Detect Books
     # -------------------------------
     crops = detect_books(temp_path)
+    if not crops:
+        st.warning("⚠️ No books detected. Try another image.")
+        st.stop()
 
     # -------------------------------
     # 🧾 OCR

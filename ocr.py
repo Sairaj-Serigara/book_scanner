@@ -4,22 +4,17 @@ import cv2
 
 reader = easyocr.Reader(['en'])
 
-def preprocess(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-    return thresh
-
 def extract_text(crops):
     texts = []
 
     for crop in crops:
         try:
-            img = np.array(crop)
-            img = preprocess(img)
+            # 🔥 ROTATE IMAGE (IMPORTANT)
+            rotated = cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)
 
-            result = reader.readtext(img)
+            result = reader.readtext(rotated)
+
             text = " ".join([r[1] for r in result])
-
             texts.append(text)
 
         except:
