@@ -1,9 +1,11 @@
 streamlit
 torch
+torchvision
 opencv-python
 easyocr
+numpy
+pillow
 pandas
 scikit-learn
 sentence-transformers
-Pillow
 seaborn

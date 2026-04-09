@@ -1,25 +1,15 @@
-import torch
-import cv2
-
-model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+from PIL import Image
 
 def detect_books(image_path):
-    img = cv2.imread(image_path)
-    results = model(img)
+    image = Image.open(image_path)
+    width, height = image.size
 
-    boxes = results.xyxy[0].cpu().numpy()
     crops = []
+    num_splits = 5
+    split_width = width // num_splits
 
-    for box in boxes:
-        x1, y1, x2, y2, conf, cls = box
-
-        # COCO class 73 = book
-        if int(cls) == 73:
-            crop = img[int(y1):int(y2), int(x1):int(x2)]
-            crops.append(crop)
-
-    # fallback if nothing detected
-    if len(crops) == 0:
-        crops.append(img)
+    for i in range(num_splits):
+        crop = image.crop((i * split_width, 0, (i + 1) * split_width, height))
+        crops.append(crop)
 
     return crops

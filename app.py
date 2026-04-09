@@ -11,6 +11,18 @@ import pandas as pd
 st.title("📚 AI Bookshelf Scanner")
 
 # -------------------------------
+# 🧹 Clean OCR Text
+# -------------------------------
+def clean_ocr_text(texts):
+    cleaned = []
+    for t in texts:
+        t = t.lower()
+        t = ''.join(ch for ch in t if ch.isalnum() or ch.isspace())
+        if len(t.strip()) > 3:
+            cleaned.append(t.strip())
+    return cleaned
+
+# -------------------------------
 # 📤 Upload Image
 # -------------------------------
 uploaded_file = st.file_uploader("Upload bookshelf image")
@@ -19,29 +31,30 @@ if uploaded_file:
     image = Image.open(uploaded_file)
     st.image(image, caption="Uploaded Image", width="stretch")
 
-    # Save temp image
     temp_path = "temp.jpg"
     image.save(temp_path)
 
     # -------------------------------
-    # 🔍 Step 1: Detect Books
+    # 🔍 Detect Books
     # -------------------------------
     crops = detect_books(temp_path)
 
     # -------------------------------
-    # 🧾 Step 2: OCR
+    # 🧾 OCR
     # -------------------------------
     texts = extract_text(crops)
+    texts = clean_ocr_text(texts)
 
     st.subheader("📚 Extracted Text (OCR)")
     for t in texts:
-        st.write(t)
+        st.write(f"📄 {t}")
 
     # -------------------------------
-    # 🔎 Step 3: User Interest
+    # 🔎 Interest Input
     # -------------------------------
     interest = st.text_input("🔍 Enter your interest")
 
+    # ✅ FIXED LOGIC HERE
     if interest:
         interest = interest.lower()
 
@@ -50,58 +63,66 @@ if uploaded_file:
         # -------------------------------
         # 📘 Detected Books
         # -------------------------------
-        st.subheader("📚 Detected Books (Matched)")
-
+        st.subheader("📚 Detected Books")
         if matched_titles:
             for title in matched_titles:
                 st.write(f"📘 {title}")
         else:
-            st.warning("⚠️ Could not confidently detect book titles")
+            st.warning("⚠️ No confident book titles detected")
 
         # -------------------------------
-        # 🎯 Strong Recommendations
+        # 🎯 Recommendations
         # -------------------------------
         st.subheader("🎯 Recommendations")
 
-        strong = results[results['score'] > 0.5]
+        strong = results[results['score'] > 0.3]
 
         if not strong.empty:
             for _, row in strong.iterrows():
                 st.success(
-                    f"📘 {row['title']} ({row['genre']}) - Score: {round(row['score'],2)}"
+                    f"📘 {row['title']} ({row['genre']}) - {round(row['score'],2)}"
                 )
         else:
-            st.warning(f"⚠️ Only few strong matches for '{interest}'")
+            st.warning("⚠️ Few strong matches found")
 
         # -------------------------------
-        # 📚 You may also like (NO DUPLICATES)
+        # 📚 You may also like
         # -------------------------------
-        st.subheader("📚 You may also like:")
+        st.subheader("📚 You may also like")
 
-        shown_titles = set(strong['title'])
-
+        shown = set(strong['title'])
         count = 0
+
         for _, row in results.iterrows():
-            if row['title'] not in shown_titles:
+            if row['title'] not in shown:
                 st.write(
-                    f"📘 {row['title']} ({row['genre']}) - Score: {round(row['score'],2)}"
+                    f"📘 {row['title']} ({row['genre']}) - {round(row['score'],2)}"
                 )
                 count += 1
             if count == 3:
                 break
 
         # -------------------------------
-        # 🌍 Outside Shelf Recommendations
+        # 🌍 Outside Shelf
         # -------------------------------
         if strong.empty:
-            st.subheader("🌍 Recommended outside your shelf:")
+            st.subheader("🌍 Outside Shelf Recommendations")
 
-            full_df = pd.read_csv("data/books.csv")
-
-            outside = full_df[full_df['genre'] == interest]
+            df = pd.read_csv("data/books.csv")
+            outside = df[df['genre'].str.contains(interest, case=False, na=False)]
 
             if not outside.empty:
                 for _, row in outside.head(3).iterrows():
                     st.success(f"📘 {row['title']} ({row['genre']})")
             else:
-                st.info("No additional recommendations found for this interest.")
+                st.info("No extra recommendations found")
+
+        # -------------------------------
+        # 🧠 Debug Info
+        # -------------------------------
+        st.subheader("🧠 Debug Info")
+        # st.write("OCR:", texts)
+        st.write("Interest:", interest)
+
+    else:
+        st.info("👆 Enter your interest to get recommendations")

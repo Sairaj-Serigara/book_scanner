@@ -1,53 +1,35 @@
 import pandas as pd
-from rapidfuzz import process
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
+from difflib import SequenceMatcher
 
-# Load model + dataset once
-model = SentenceTransformer('all-MiniLM-L6-v2')
-df = pd.read_csv("data/books.csv")
+def similarity(a, b):
+    return SequenceMatcher(None, a, b).ratio()
 
+def recommend(interest, ocr_texts):
+    df = pd.read_csv("data/books.csv")
 
-# -------------------------------
-# 🔍 Fuzzy Match OCR → Real Titles
-# -------------------------------
-def match_titles(ocr_texts):
+    scores = []
     matched_titles = []
 
-    for text in ocr_texts:
-        match, score, _ = process.extractOne(text, df['title'])
+    for _, row in df.iterrows():
+        title = row['title'].lower()
+        genre = row['genre'].lower()
 
-        if score > 60:  # threshold
-            matched_titles.append(match)
+        score = 0
 
-    return list(set(matched_titles))
+        for text in ocr_texts:
+            for word in text.split():
+                sim = similarity(word, title)
+                if sim > 0.5:
+                    score += sim
+                    if row['title'] not in matched_titles:
+                        matched_titles.append(row['title'])
 
+        if interest:
+            score += similarity(interest, genre)
 
-# -------------------------------
-# 🎯 Recommendation Function
-# -------------------------------
-def recommend(user_interest, ocr_texts):
+        scores.append(score)
 
-    matched_titles = match_titles(ocr_texts)
+    df['score'] = scores
+    df = df.sort_values(by='score', ascending=False)
 
-    # Filter only detected books
-    if matched_titles:
-        filtered_df = df[df['title'].isin(matched_titles)].copy()
-    else:
-        filtered_df = df.copy()
-
-    # Create embeddings
-    corpus = filtered_df['description'].tolist() + [user_interest]
-    embeddings = model.encode(corpus)
-
-    user_vec = embeddings[-1]
-    book_vecs = embeddings[:-1]
-
-    scores = cosine_similarity([user_vec], book_vecs)[0]
-
-    filtered_df['score'] = scores
-
-    # Sort results
-    filtered_df = filtered_df.sort_values(by="score", ascending=False)
-
-    return filtered_df, matched_titles
+    return df, matched_titles
