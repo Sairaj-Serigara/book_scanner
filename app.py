@@ -23,6 +23,17 @@ def clean_ocr_text(texts):
     return cleaned
 
 # -------------------------------
+# 🚫 Remove Garbage OCR
+# -------------------------------
+def remove_noise(texts):
+    clean = []
+    for t in texts:
+        # keep meaningful text only
+        if len(t.split()) >= 2 and any(c.isalpha() for c in t):
+            clean.append(t)
+    return clean
+
+# -------------------------------
 # 📤 Upload Image
 # -------------------------------
 uploaded_file = st.file_uploader("Upload bookshelf image")
@@ -44,6 +55,7 @@ if uploaded_file:
     # -------------------------------
     texts = extract_text(crops)
     texts = clean_ocr_text(texts)
+    texts = remove_noise(texts)   # ✅ FIX 1 APPLIED
 
     st.subheader("📚 Extracted Text (OCR)")
     for t in texts:
@@ -54,7 +66,6 @@ if uploaded_file:
     # -------------------------------
     interest = st.text_input("🔍 Enter your interest")
 
-    # ✅ FIXED LOGIC HERE
     if interest:
         interest = interest.lower()
 
@@ -116,13 +127,6 @@ if uploaded_file:
                     st.success(f"📘 {row['title']} ({row['genre']})")
             else:
                 st.info("No extra recommendations found")
-
-        # -------------------------------
-        # 🧠 Debug Info
-        # -------------------------------
-        st.subheader("🧠 Debug Info")
-        # st.write("OCR:", texts)
-        st.write("Interest:", interest)
 
     else:
         st.info("👆 Enter your interest to get recommendations")

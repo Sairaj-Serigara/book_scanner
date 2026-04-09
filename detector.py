@@ -5,11 +5,16 @@ def detect_books(image_path):
     width, height = image.size
 
     crops = []
-    num_splits = 5
+
+    # 🔥 increase splits (important)
+    num_splits = 12   # instead of 5
     split_width = width // num_splits
 
     for i in range(num_splits):
-        crop = image.crop((i * split_width, 0, (i + 1) * split_width, height))
+        left = i * split_width
+        right = (i + 1) * split_width
+
+        crop = image.crop((left, 0, right, height))
         crops.append(crop)
 
     return crops

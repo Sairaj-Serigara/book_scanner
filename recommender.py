@@ -16,6 +16,7 @@ def recommend(interest, ocr_texts):
 
         score = 0
 
+        # 🔹 OCR matching
         for text in ocr_texts:
             for word in text.split():
                 sim = similarity(word, title)
@@ -24,8 +25,9 @@ def recommend(interest, ocr_texts):
                     if row['title'] not in matched_titles:
                         matched_titles.append(row['title'])
 
+        # 🔥 FIX 2: Boost interest weight
         if interest:
-            score += similarity(interest, genre)
+            score += 2 * similarity(interest, genre)
 
         scores.append(score)
 
